@@ -1,0 +1,7 @@
+FROM tianon/true
+EXPOSE 8080
+
+COPY certs/certs /etc/ssl/certs/ca-certificates.crt
+ADD main /
+
+CMD ["/main"]

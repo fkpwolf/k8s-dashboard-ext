@@ -1,0 +1,15 @@
+# - Build with:
+#
+#   docker build -t durdn/build-da -f ./Dockerfile.build .
+#   docker run durdn/build-da /bin/true
+#   docker cp $(docker ps -q -n=1):/main .
+
+FROM golang
+
+ADD Makefile /
+WORKDIR /
+RUN make setup
+
+ADD ./project-name /go/src/bitbucket.org/durdn/go-static-build-example/project-name
+RUN make buildgo
+CMD ["/bin/bash"]
