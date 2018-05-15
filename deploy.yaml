@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8s-ext
+spec:
+  type: NodePort
+  ports:
+    - port: 80
+      targetPort: 8080
+  selector:
+    app: k8s-ext
+---
+apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: k8s-ext-deployment
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: k8s-ext
+    spec:
+      containers:
+      - name: k8s-ext
+        image: 10.21.1.59/library/fan/k8s-ext:latest
+        ports:
+        - containerPort: 8080

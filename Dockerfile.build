@@ -11,5 +11,6 @@ WORKDIR /
 RUN make setup
 
 ADD ./project-name /go/src/bitbucket.org/durdn/go-static-build-example/project-name
+RUN make setup
 RUN make buildgo
 CMD ["/bin/bash"]

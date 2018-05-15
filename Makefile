@@ -2,7 +2,7 @@ default: builddocker
 
 setup:
 	echo "Here grab dependencies with 'go get...'"
-	# go get ...
+	go get ...
 
 buildgo:
 	CGO_ENABLED=0 GOOS=linux go build -ldflags "-s" -a -installsuffix cgo -o main ./go/src/bitbucket.org/durdn/go-static-build-example/project-name
