@@ -17,23 +17,24 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	// Uncomment the following line to load the gcp plugin (only required to authenticate against GKE clusters).
 	// _ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 )
 
 type NodeResourceUsage struct { // 主机 CPU 或者内存
-	Name        string `bson:"name"`
-	Compare     string `bson:"compare"`
-	Threshold   int    `bson:"threshold"`
-	Severity    string `bson:"severity"`
-	Description string `bson:"description"`
-	Node        string `bson:"node"`
-	ID          string `bsone:"id"`
-	Period      string `bsone:"period"`
-	Target      string `bsone:"target"`
-	Function    string `bsone:"function"`
-	Enabled     bool   `bsone:"enabled"`
+	Name         string  `bson:"name"`
+	Compare      string  `bson:"compare"`
+	Threshold    float32 `bson:"threshold"`
+	Severity     string  `bson:"severity"`
+	Description  string  `bson:"description"`
+	Node         string  `bson:"node"`
+	ID           string  `bsone:"id"`
+	Period       string  `bsone:"period"`
+	Target       string  `bsone:"target"`
+	Function     string  `bsone:"function"`
+	Enabled      bool    `bsone:"enabled"`
+	ResourceType string  `bsone:"resourcetype"`
 }
 
 type Resp struct {
@@ -51,8 +52,8 @@ const (
 
 func main() {
 	DBHost := []string{
-		//"192.168.1.140:30275",
-		"dashboard-db-mongodb:27017",
+		"192.168.1.140:30275",
+		// "dashboard-db-mongodb:27017",
 		// replica set addrs...
 	}
 
@@ -158,7 +159,6 @@ func toggleRule(s *mgo.Session) func(w http.ResponseWriter, r *http.Request) {
 
 		var rule NodeResourceUsage
 		c.Find(bson.M{"id": id}).One(&rule)
-		fmt.Println("will toogle rule:", rule)
 		rule.Enabled = !rule.Enabled
 		err := c.Update(bson.M{"id": rule.ID}, &rule)
 		if err != nil {
@@ -206,17 +206,29 @@ func allRules(s *mgo.Session) func(w http.ResponseWriter, r *http.Request) {
 }
 
 const cpuTemplate = `ALERT NodeCPUUsage
-			IF (100 - (avg by (instance) (irate(node_cpu{name="node-exporter",mode="idle"}[5m])) * 100)) [[.Compare]] [[.Threshold]]  
-			FOR [[.Period]]
-			LABELS { severity="page"}
-			ANNOTATIONS {SUMMARY = "{{$labels.instance}}: 检测到高 CPU 使用率",
-				DESCRIPTION = "{{$labels.instance}}: CPU 使用率 is above [[.Threshold]]% (current value is: {{ $value }})"}`
+	IF (100 - (avg by (instance) (irate(node_cpu{mode="idle"}[5m])) * 100)) [[.Compare]] [[.Threshold]]  
+	FOR [[.Period]]
+	LABELS { severity="[[.Severity]]"}
+	ANNOTATIONS {SUMMARY = "{{$labels.instance}}: 检测到高 CPU 使用率",
+		DESCRIPTION = "{{$labels.instance}}: CPU 使用率 is above [[.Threshold]]% (current value is: {{ $value }})"}`
 const memTemplate = `ALERT NodeMemoryUsage
-			IF (((node_memory_MemTotal - node_memory_MemFree - node_memory_Cached) / (node_memory_MemTotal) * 100)) [[.Compare]] [[.Threshold]]
-			FOR [[.Period]]
-			LABELS {severity="page"}
-			ANNOTATIONS {DESCRIPTION="{{$labels.instance}}: 内存用量 is above [[.Threshold]]% (当前值: {{ $value }})", 
-						 SUMMARY="[[.Description]]"}`
+	IF (((node_memory_MemTotal - node_memory_MemFree - node_memory_Cached) / (node_memory_MemTotal) * 100)) [[.Compare]] [[.Threshold]]
+	FOR [[.Period]]
+	LABELS {severity="[[.Severity]]"}
+	ANNOTATIONS {DESCRIPTION="{{$labels.instance}}: 内存用量 is above [[.Threshold]]% (当前值: {{ $value }})", 
+					SUMMARY="[[.Description]]"}`
+const containerCPUTemplate = `ALERT ContainerCPUUsage
+	IF sum(rate(container_cpu_usage_seconds_total{name=~".+"}[5m])) BY (name) * 100 [[.Compare]] [[.Threshold]]  
+	FOR [[.Period]]
+	LABELS { severity="[[.Severity]]"}
+	ANNOTATIONS {DESCRIPTION="{{$labels.name}}: 容器 CPU 使用率 is above 1% (current value is: {{ $value }})", 
+					SUMMARY="[[.Description]]"}`
+const containerMemTemplate = `ALERT ContainerCPUUsage
+	IF sum(rate(container_cpu_usage_seconds_total{name=~".+"}[5m])) BY (name) * 100 [[.Compare]] [[.Threshold]]  
+	FOR [[.Period]]
+	LABELS { severity="[[.Severity]]"}
+	ANNOTATIONS {DESCRIPTION="{{$labels.name}}: 容器 CPU 使用率 is above 1% (current value is: {{ $value }})", 
+					SUMMARY="[[.Description]]"}`
 
 const configMapName = "prometheus-rules"
 
@@ -237,6 +249,8 @@ func sync(s *mgo.Session) {
 
 	memTmpl, _ := template.New("mem-template").Delims("[[", "]]").Parse(memTemplate)
 	cpuTmpl, _ := template.New("cpu-template").Delims("[[", "]]").Parse(cpuTemplate)
+	containerMemTmpl, _ := template.New("container-mem-template").Delims("[[", "]]").Parse(containerMemTemplate)
+	containerCPUTmpl, _ := template.New("container-cpu-template").Delims("[[", "]]").Parse(containerCPUTemplate)
 
 	newCofingmap := v1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -246,10 +260,18 @@ func sync(s *mgo.Session) {
 	}
 	for _, rule := range rules {
 		var tpl bytes.Buffer
-		if rule.Target == "cpu" {
-			cpuTmpl.Execute(&tpl, rule)
-		} else {
-			memTmpl.Execute(&tpl, rule)
+		if rule.ResourceType == "node" { // ugly
+			if rule.Target == "cpu" {
+				cpuTmpl.Execute(&tpl, rule)
+			} else {
+				memTmpl.Execute(&tpl, rule)
+			}
+		} else if rule.ResourceType == "container" {
+			if rule.Target == "cpu" {
+				containerCPUTmpl.Execute(&tpl, rule)
+			} else {
+				containerMemTmpl.Execute(&tpl, rule)
+			}
 		}
 
 		newCofingmap.Data[rule.ID+".rules"] = tpl.String()
@@ -257,8 +279,8 @@ func sync(s *mgo.Session) {
 
 	// 建立 k8s 连接
 
-	// config, err2 := clientcmd.BuildConfigFromFlags("", "/Users/fan/k8s-admin.conf")  // 集群外
-	config, err2 := rest.InClusterConfig() // 集群内
+	config, err2 := clientcmd.BuildConfigFromFlags("", "/Users/fan/k8s-admin.conf") // 集群外
+	//config, err2 := rest.InClusterConfig() // 集群内
 	if err2 != nil {
 		fmt.Println("get error:", err2)
 	}
