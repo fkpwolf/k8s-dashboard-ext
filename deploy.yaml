@@ -24,5 +24,11 @@ spec:
       containers:
       - name: k8s-ext
         image: 10.21.1.59/library/fan/k8s-ext:latest
+        imagePullPolicy: Always
+        env:
+        - name: FOR_GODS_SAKE_PLEASE_REDEPLOY
+          value: 'THIS_STRING_IS_REPLACED_DURING_BUILD34'
+        args:
+          - -prod-mode
         ports:
         - containerPort: 8080

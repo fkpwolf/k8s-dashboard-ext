@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -17,6 +18,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	// Uncomment the following line to load the gcp plugin (only required to authenticate against GKE clusters).
 	// _ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
@@ -50,11 +52,21 @@ const (
 	Collection = "RULE_COLLECTION"
 )
 
+var prodMode = flag.Bool("prod-mode", false, "the url to send a request to when the specified config map volume directory has been updated")
+
 func main() {
-	DBHost := []string{
-		"192.168.1.140:30275",
-		// "dashboard-db-mongodb:27017",
-		// replica set addrs...
+	flag.Parse()
+	fmt.Println("prodMode:", *prodMode)
+	var DBHost []string
+	if *prodMode {
+		DBHost = []string{
+			"dashboard-db-mongodb:27017",
+			// replica set addrs...
+		}
+	} else {
+		DBHost = []string{
+			"192.168.1.140:30275",
+		}
 	}
 
 	session, err := mgo.DialWithInfo(&mgo.DialInfo{
@@ -97,6 +109,10 @@ func addRule(s *mgo.Session) func(w http.ResponseWriter, r *http.Request) {
 		uuid, _ := uuid.NewRandom()
 		rule.ID = uuid.String()
 		rule.Enabled = true
+
+		if rule.Target == "status" {
+			rule.Threshold = 0
+		}
 
 		c := session.DB(Database).C(Collection)
 
@@ -205,6 +221,7 @@ func allRules(s *mgo.Session) func(w http.ResponseWriter, r *http.Request) {
 
 }
 
+// 节点
 const cpuTemplate = `ALERT NodeCPUUsage
 	IF (100 - (avg by (instance) (irate(node_cpu{mode="idle"}[5m])) * 100)) [[.Compare]] [[.Threshold]]  
 	FOR [[.Period]]
@@ -216,19 +233,27 @@ const memTemplate = `ALERT NodeMemoryUsage
 	FOR [[.Period]]
 	LABELS {severity="[[.Severity]]"}
 	ANNOTATIONS {DESCRIPTION="{{$labels.instance}}: 内存用量 is above [[.Threshold]]% (当前值: {{ $value }})", 
-					SUMMARY="[[.Description]]"}`
+		SUMMARY="[[.Description]]"}`
+const statusTemplate = `ALERT InstanceDown
+	IF up == 0
+	FOR [[.Period]]
+	LABELS {severity="[[.Severity]]"}
+	ANNOTATIONS {DESCRIPTION="{{ $labels.instance }} of job {{ $labels.job }} has been down for more than [[.Period]] minute.", 
+		SUMMARY="[[.Description]]"}`
+
+// 容器
 const containerCPUTemplate = `ALERT ContainerCPUUsage
 	IF sum(rate(container_cpu_usage_seconds_total{name=~".+"}[5m])) BY (name) * 100 [[.Compare]] [[.Threshold]]  
 	FOR [[.Period]]
 	LABELS { severity="[[.Severity]]"}
 	ANNOTATIONS {DESCRIPTION="{{$labels.name}}: 容器 CPU 使用率 is above 1% (current value is: {{ $value }})", 
-					SUMMARY="[[.Description]]"}`
+		SUMMARY="[[.Description]]"}`
 const containerMemTemplate = `ALERT ContainerCPUUsage
 	IF sum(rate(container_cpu_usage_seconds_total{name=~".+"}[5m])) BY (name) * 100 [[.Compare]] [[.Threshold]]  
 	FOR [[.Period]]
 	LABELS { severity="[[.Severity]]"}
 	ANNOTATIONS {DESCRIPTION="{{$labels.name}}: 容器 CPU 使用率 is above 1% (current value is: {{ $value }})", 
-					SUMMARY="[[.Description]]"}`
+		SUMMARY="[[.Description]]"}`
 
 const configMapName = "prometheus-rules"
 
@@ -247,8 +272,10 @@ func sync(s *mgo.Session) {
 		return
 	}
 
+	//node
 	memTmpl, _ := template.New("mem-template").Delims("[[", "]]").Parse(memTemplate)
 	cpuTmpl, _ := template.New("cpu-template").Delims("[[", "]]").Parse(cpuTemplate)
+	statusTmpl, _ := template.New("status-template").Delims("[[", "]]").Parse(statusTemplate)
 	containerMemTmpl, _ := template.New("container-mem-template").Delims("[[", "]]").Parse(containerMemTemplate)
 	containerCPUTmpl, _ := template.New("container-cpu-template").Delims("[[", "]]").Parse(containerCPUTemplate)
 
@@ -263,14 +290,20 @@ func sync(s *mgo.Session) {
 		if rule.ResourceType == "node" { // ugly
 			if rule.Target == "cpu" {
 				cpuTmpl.Execute(&tpl, rule)
-			} else {
+			} else if rule.Target == "mem" {
 				memTmpl.Execute(&tpl, rule)
+			} else if rule.Target == "status" {
+				statusTmpl.Execute(&tpl, rule)
+			} else {
+				fmt.Println("Can't handle rule target:", rule.Target)
 			}
 		} else if rule.ResourceType == "container" {
 			if rule.Target == "cpu" {
 				containerCPUTmpl.Execute(&tpl, rule)
-			} else {
+			} else if rule.Target == "mem" {
 				containerMemTmpl.Execute(&tpl, rule)
+			} else {
+				fmt.Println("Can't handle rule target:", rule.Target)
 			}
 		}
 
@@ -278,9 +311,13 @@ func sync(s *mgo.Session) {
 	}
 
 	// 建立 k8s 连接
-
-	config, err2 := clientcmd.BuildConfigFromFlags("", "/Users/fan/k8s-admin.conf") // 集群外
-	//config, err2 := rest.InClusterConfig() // 集群内
+	var config *rest.Config
+	var err2 error
+	if *prodMode {
+		config, err2 = rest.InClusterConfig() // 集群内
+	} else {
+		config, err2 = clientcmd.BuildConfigFromFlags("", "/Users/fan/k8s-admin.conf") // 集群外
+	}
 	if err2 != nil {
 		fmt.Println("get error:", err2)
 	}
